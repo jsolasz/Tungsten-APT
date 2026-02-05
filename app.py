@@ -542,6 +542,16 @@ def compute_months_change(series: pd.Series, months_back: int) -> Tuple[Optional
     return abs_change, pct_change
 
 
+def value_on_or_before(series: pd.Series, target_date: pd.Timestamp) -> Tuple[Optional[pd.Timestamp], Optional[float]]:
+    series = series.dropna()
+    if series.empty:
+        return None, None
+    series = series.loc[series.index <= target_date]
+    if series.empty:
+        return None, None
+    return series.index[-1], float(series.iloc[-1])
+
+
 def format_change(abs_change: Optional[float], pct_change: Optional[float]) -> str:
     if abs_change is None or pct_change is None:
         return "n/a"
@@ -930,18 +940,16 @@ with tab1:
     if equity_implied is not None and not np.isnan(equity_implied):
         # Build a daily implied series from the monthly-fitted coefficients
         implied_daily = pd.Series(dtype="float64")
-        try:
-            basket_daily_all = build_equal_weight_index_daily(px)
-            if not basket_daily_all.empty:
-                X_latest_daily = basket_daily_all.to_frame("Basket")
-                Xz_daily = (X_latest_daily - X_mean_i) / X_std_i.replace(0, np.nan)
-                Xz_daily = Xz_daily.fillna(0.0)
-                implied_daily = (Xz_daily @ coef_i) + intercept_i
-                implied_daily.name = "Equity_Implied_APT_Daily"
-        except Exception:
-            implied_daily = pd.Series(dtype="float64")
+        basket_daily_all = build_equal_weight_index_daily(px)
+        if (not basket_daily_all.empty) and (coef_i is not None) and (len(coef_i) > 0):
+            X_daily = basket_daily_all.to_frame("Basket")
+            Xz_daily = (X_daily - X_mean_i) / X_std_i.replace(0, np.nan)
+            Xz_daily = Xz_daily.fillna(0.0)
+            implied_daily = (Xz_daily @ coef_i) + intercept_i
+            implied_daily.name = "Equity_Implied_APT_Daily"
 
         series_for_change = implied_daily if not implied_daily.empty else equity_implied_series
+        series_label = "Daily implied" if not implied_daily.empty else "Monthly implied"
         eq_wow_change = compute_change(series_for_change, 7)
         eq_mom_change = compute_months_change(series_for_change, 1)
         eq_qoq_change = compute_months_change(series_for_change, 3)
@@ -982,6 +990,17 @@ with tab1:
 ''',
             unsafe_allow_html=True
         )
+
+        with st.expander("Equity-Implied Calc Details"):
+            last_dt, last_val = value_on_or_before(series_for_change, series_for_change.index.max())
+            wow_dt, wow_val = value_on_or_before(series_for_change, series_for_change.index.max() - pd.Timedelta(days=7))
+            mom_dt, mom_val = value_on_or_before(series_for_change, series_for_change.index.max() - pd.DateOffset(months=1))
+            qoq_dt, qoq_val = value_on_or_before(series_for_change, series_for_change.index.max() - pd.DateOffset(months=3))
+            st.caption(f"Series used: {series_label}")
+            st.caption(f"Latest: {last_dt.date() if last_dt is not None else 'n/a'} | {last_val:,.2f}" if last_dt is not None else "Latest: n/a")
+            st.caption(f"WoW ref: {wow_dt.date() if wow_dt is not None else 'n/a'} | {wow_val:,.2f}" if wow_dt is not None else "WoW ref: n/a")
+            st.caption(f"MoM ref: {mom_dt.date() if mom_dt is not None else 'n/a'} | {mom_val:,.2f}" if mom_dt is not None else "MoM ref: n/a")
+            st.caption(f"QoQ ref: {qoq_dt.date() if qoq_dt is not None else 'n/a'} | {qoq_val:,.2f}" if qoq_dt is not None else "QoQ ref: n/a")
 
     col_sp1 = st.columns([1])[0]
     col_sp1.markdown(
