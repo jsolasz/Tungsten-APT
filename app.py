@@ -22,6 +22,7 @@ import yfinance as yf
 import matplotlib.pyplot as plt
 import streamlit as st
 import numpy as np
+import plotly.graph_objects as go
 
 
 # =============================
@@ -418,6 +419,58 @@ def build_equal_weight_index_daily(px_daily: pd.DataFrame) -> pd.Series:
     idx_daily = 100.0 * (idx_daily / idx_daily.iloc[0])
     idx_daily.name = "Tungsten_APT_Thematic_Basket_Daily_100_start"
     return idx_daily
+
+
+def fetch_intraday_last_and_prev_close(tickers: List[str]) -> Tuple[pd.Series, pd.Series]:
+    """
+    Returns (last_price, prev_close) for each ticker when available.
+    Falls back to daily close if intraday is unavailable.
+    """
+    if not tickers:
+        return pd.Series(dtype="float64"), pd.Series(dtype="float64")
+
+    last_price = pd.Series(index=tickers, dtype="float64")
+    prev_close = pd.Series(index=tickers, dtype="float64")
+
+    try:
+        daily = yf.download(tickers, period="5d", interval="1d", progress=False)["Close"]
+        if isinstance(daily, pd.Series):
+            daily = daily.to_frame()
+    except Exception:
+        daily = pd.DataFrame()
+
+    try:
+        intraday = yf.download(tickers, period="1d", interval="1m", progress=False)["Close"]
+        if isinstance(intraday, pd.Series):
+            intraday = intraday.to_frame()
+    except Exception:
+        intraday = pd.DataFrame()
+
+    for t in tickers:
+        last_val = np.nan
+        prev_val = np.nan
+
+        if not intraday.empty and t in intraday.columns:
+            s = intraday[t].dropna()
+            if not s.empty:
+                last_val = float(s.iloc[-1])
+
+        if not daily.empty and t in daily.columns:
+            s = daily[t].dropna()
+            if len(s) >= 2:
+                prev_val = float(s.iloc[-2])
+            elif len(s) == 1:
+                prev_val = float(s.iloc[-1])
+
+        if np.isnan(last_val) and not daily.empty and t in daily.columns:
+            s = daily[t].dropna()
+            if not s.empty:
+                last_val = float(s.iloc[-1])
+
+        last_price[t] = last_val
+        prev_close[t] = prev_val
+
+    return last_price, prev_close
 
 
 def ticker_label(ticker: str) -> str:
@@ -1123,6 +1176,8 @@ with tab2:
         end_date = px_5y.index.max()
         ytd_start = pd.Timestamp(year=end_date.year, month=1, day=1)
         window_options = {
+            "1W": end_date - pd.DateOffset(weeks=1),
+            "1M": end_date - pd.DateOffset(months=1),
             "YTD": ytd_start,
             "1Y": end_date - pd.DateOffset(years=1),
             "3Y": end_date - pd.DateOffset(years=3),
@@ -1130,7 +1185,7 @@ with tab2:
         }
         window_choice = st.radio(
             "Timeframe",
-            options=["YTD", "1Y", "3Y", "5Y"],
+            options=["1W", "1M", "YTD", "1Y", "3Y", "5Y"],
             horizontal=True
         )
         start_date = window_options[window_choice]
@@ -1153,7 +1208,18 @@ with tab2:
             unsafe_allow_html=True
         )
 
-        basket_dod_change = compute_change(basket_daily, 1)
+        use_intraday = st.checkbox("Use intraday last price for DoD%", value=True)
+        if use_intraday:
+            last_px, prev_close = fetch_intraday_last_and_prev_close(list(px_window.columns))
+            valid = (last_px.notna()) & (prev_close.notna()) & (prev_close != 0)
+            if valid.any():
+                rets = (last_px[valid] / prev_close[valid]) - 1.0
+                basket_dod_pct = float(rets.mean() * 100.0)
+                basket_dod_change = (np.nan, basket_dod_pct)
+            else:
+                basket_dod_change = compute_change(basket_daily, 1)
+        else:
+            basket_dod_change = compute_change(basket_daily, 1)
         basket_wow_change = compute_change(basket_daily, 7)
         basket_mom_change = compute_change(basket_daily, 30)
         col_a, col_b, col_c = st.columns(3)
@@ -1199,28 +1265,36 @@ with tab2:
             )
 
         basket_plot = basket_daily.reindex(holdings_norm.index).dropna()
-        ax.plot(
-            basket_plot.index,
-            basket_plot.values,
-            color=CHART_COLORS["basket"],
-            linewidth=3.6,
-            label="Basket Index"
-        )
+        plot_df = holdings_norm.copy()
+        plot_df["Basket Index"] = basket_plot
+        plot_df = plot_df.rename(columns={c: ticker_label(c) for c in holdings_norm.columns})
 
-        ax.set_title(
-            "Holdings + APT Basket Performance (5Y Equity Window, Start=100)",
-            color=CHART_COLORS["text"]
+        fig = go.Figure()
+        for col in plot_df.columns:
+            is_basket = col == "Basket Index"
+            fig.add_trace(
+                go.Scatter(
+                    x=plot_df.index,
+                    y=plot_df[col],
+                    mode="lines",
+                    name=col,
+                    line=dict(
+                        width=3.6 if is_basket else 1.6,
+                        color="#ffffff" if is_basket else None,
+                    ),
+                )
+            )
+
+        fig.update_layout(
+            template="plotly_dark",
+            title="Holdings + APT Basket Performance (5Y Equity Window, Start=100)",
+            xaxis_title="Date",
+            yaxis_title="Index (Start=100)",
+            hovermode="closest",
+            legend=dict(orientation="v"),
+            margin=dict(l=40, r=20, t=50, b=40),
         )
-        ax.set_ylabel("Index (Start=100)", color=CHART_COLORS["text"])
-        ax.set_xlabel("Date", color=CHART_COLORS["text"])
-        ax.grid(True, alpha=0.35)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.spines["left"].set_color(CHART_COLORS["spine"])
-        ax.spines["bottom"].set_color(CHART_COLORS["spine"])
-        ax.tick_params(axis="both", colors=CHART_COLORS["tick"])
-        ax.legend(loc="upper left", ncol=2, fontsize=9, frameon=True, labelcolor=CHART_COLORS["text"])
-        st.pyplot(fig2, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("Holdings Total Return")
         st.dataframe(total_returns, use_container_width=True)
